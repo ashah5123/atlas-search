@@ -1,0 +1,24 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Data & artifacts
+data/
+artifacts/
+
+# MLflow
+.mlflow/
+
+# Testing
+.pytest_cache/
+
+# OS & IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
