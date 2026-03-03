@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import random
 from pathlib import Path
 from typing import List, Tuple
 
@@ -66,37 +65,26 @@ def _build_training_pairs(
     train_queries: pd.DataFrame,
     train_qrels: pd.DataFrame,
     passages: pd.DataFrame,
+    seed: int,
 ) -> QueryPassageDataset:
-    """Build (query, passage) text pairs using one random positive per query."""
-    # Keep only positive qrels
-    if "relevance" in train_qrels.columns:
-        pos_qrels = train_qrels[train_qrels["relevance"] > 0]
-    else:
-        pos_qrels = train_qrels.copy()
+    """Build (query, passage) text pairs from ALL positive qrels (keep multiple positives per qid)."""
+    # All positive qrels: keep every (qid, pid) with relevance > 0
+    if "relevance" not in train_qrels.columns:
+        raise ValueError("train_qrels must have a 'relevance' column.")
+    pairs_df = train_qrels[train_qrels["relevance"] > 0][["qid", "pid"]].copy()
 
-    if pos_qrels.empty:
-        raise RuntimeError("No positive qrels found in training data.")
+    if pairs_df.empty:
+        raise RuntimeError("No positive qrels found in training data (relevance > 0).")
 
-    grouped = pos_qrels.groupby("qid")["pid"].apply(list)
-
-    pairs: list[tuple[int, int]] = []
-    for qid, pid_list in grouped.items():
-        if not pid_list:
-            continue
-        pid = random.choice(pid_list)
-        pairs.append((int(qid), int(pid)))
-
-    if not pairs:
-        raise RuntimeError("Could not build any (qid, pid) training pairs from qrels.")
-
-    pairs_df = pd.DataFrame(pairs, columns=["qid", "pid"])
-
-    # Join to get text fields
+    # Join with train_queries on qid and passages on pid to get text columns
     merged = pairs_df.merge(train_queries[["qid", "query"]], on="qid", how="inner")
     merged = merged.merge(passages[["pid", "passage"]], on="pid", how="inner")
 
     if merged.empty:
         raise RuntimeError("Training pairs are empty after joining with queries and passages.")
+
+    # Shuffle with configured seed for reproducibility
+    merged = merged.sample(frac=1, random_state=seed).reset_index(drop=True)
 
     queries = merged["query"].astype(str).tolist()
     ps = merged["passage"].astype(str).tolist()
@@ -134,10 +122,15 @@ def train_retriever(config_path: str) -> None:
 
     # Load data
     train_queries, train_qrels, passages = _load_training_data(processed_dir)
-    dataset = _build_training_pairs(train_queries, train_qrels, passages)
+    dataset = _build_training_pairs(train_queries, train_qrels, passages, seed=seed)
 
     if len(dataset) == 0:
         raise RuntimeError("Training dataset is empty.")
+
+    num_pairs = len(dataset)
+    batches_per_epoch = (num_pairs + batch_size - 1) // batch_size
+    print(f"Number of training pairs: {num_pairs:,}")
+    print(f"Expected batches per epoch: {batches_per_epoch:,}")
 
     # Model
     bi_encoder = BiEncoder(model_name=model_name, normalize=normalize, device=None)
@@ -155,6 +148,9 @@ def train_retriever(config_path: str) -> None:
         qs, ps = zip(*batch)
         return list(qs), list(ps)
 
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -162,6 +158,7 @@ def train_retriever(config_path: str) -> None:
         num_workers=0,
         collate_fn=collate_fn,
         drop_last=False,
+        generator=generator,
     )
 
     bi_encoder.query_encoder.train()
@@ -208,6 +205,10 @@ def train_retriever(config_path: str) -> None:
 
             loss = criterion(logits, targets)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(bi_encoder.query_encoder.parameters()) + list(bi_encoder.doc_encoder.parameters()),
+                max_norm=1.0,
+            )
             optimizer.step()
 
             batch_loss = float(loss.item())

@@ -2,25 +2,23 @@ paths:
   raw_dir: data/raw/msmarco_passage
   processed_dir: data/processed/msmarco_passage
   artifacts_dir: artifacts
-
 limits:
-  max_passages: 200000
+  max_passages: 500000
   max_train_queries: 20000
   max_dev_queries: 2000
-
 retriever:
   model_name: distilbert-base-uncased
   max_len: 128
   batch_size: 64
   lr: 2e-5
-  epochs: 1
+  epochs: 3
   normalize: true
   seed: 42
-
 faiss:
   index_type: flatip
+  encoder_backend: sentence_transformer
+  st_model_name: sentence-transformers/all-MiniLM-L6-v2
   topk: 100
-
 ranker:
   objective: lambdarank
   num_leaves: 127
