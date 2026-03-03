@@ -17,7 +17,7 @@ from src.utils.config import get_path, load_config
 
 # Limit FAISS to a single thread for reproducibility / stability.
 faiss.omp_set_num_threads(1)
-print("FAISS threads set to 1 in eval_retrieval.py")
+print("FAISS threads: 1")
 
 
 def _load_dev_data(processed_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
