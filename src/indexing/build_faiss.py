@@ -16,6 +16,10 @@ from transformers import AutoModel, AutoTokenizer
 
 from src.utils.config import get_path, load_config, set_seed
 
+# Limit FAISS to a single thread for reproducibility / stability.
+faiss.omp_set_num_threads(1)
+print("FAISS threads set to 1 in build_faiss.py")
+
 
 def _load_passages(processed_dir: Path, max_passages: int) -> Tuple[np.ndarray, List[str]]:
     """Load and limit passages from Parquet."""

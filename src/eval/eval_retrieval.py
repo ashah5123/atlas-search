@@ -15,6 +15,10 @@ from transformers import AutoModel, AutoTokenizer
 
 from src.utils.config import get_path, load_config
 
+# Limit FAISS to a single thread for reproducibility / stability.
+faiss.omp_set_num_threads(1)
+print("FAISS threads set to 1 in eval_retrieval.py")
+
 
 def _load_dev_data(processed_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load dev queries and qrels Parquet files. Prefer *_in_corpus versions if present."""
