@@ -26,13 +26,23 @@ from src.utils.config import get_path, load_config
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Search query text")
     topk: int = Field(default=10, ge=1, le=50, description="Number of results to return")
-    candidates_k: int = Field(default=100, ge=1, le=500, description="Number of candidates to retrieve before rerank")
+    candidates_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description="Number of candidates to retrieve before rerank (defaults to config serving.candidates_k)",
+    )
+    reranker: str = Field(
+        default="lgbm",
+        description="Which reranker to use: 'none', 'lgbm' (default), 'cross', or 'stacked'.",
+    )
 
 
 class SearchResultItem(BaseModel):
     pid: int
-    rerank_score: float
     dense_score: float
+    rerank_score: Optional[float] = None
+    cross_score: Optional[float] = None
     passage: str
 
 
@@ -59,6 +69,11 @@ class AppState:
     hf_device: Optional[torch.device] = None
     max_len: int = 128
     normalize: bool = True
+    serving_candidates_k: int = 100
+    stacked_topn: int = 50
+    cross_encoder_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    cross_encoder_batch_size: int = 32
+    cross_reranker: Optional[Any] = None
 
 
 def _tokenize(text: str) -> List[str]:
@@ -77,6 +92,9 @@ def _load_assets(config_path: str) -> AppState:
 
     faiss_cfg = cfg.get("faiss", {})
     retriever_cfg = cfg.get("retriever", {})
+    serving_cfg = cfg.get("serving", {})
+    stacked_cfg = cfg.get("stacked_rerank", {})
+    cross_cfg = cfg.get("cross_encoder", {})
 
     # FAISS index and pids
     index_path = repo_root / "artifacts" / "index" / "faiss.index"
@@ -133,6 +151,12 @@ def _load_assets(config_path: str) -> AppState:
     backend = str(faiss_cfg.get("encoder_backend", "hf_biencoder")).strip().lower()
     max_len = int(retriever_cfg.get("max_len", 128))
     normalize = bool(retriever_cfg.get("normalize", True))
+    serving_candidates_k = int(serving_cfg.get("candidates_k", 100))
+    stacked_topn = int(stacked_cfg.get("topn", 50))
+    cross_encoder_model_name = str(
+        cross_cfg.get("model_name", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    )
+    cross_encoder_batch_size = int(cross_cfg.get("batch_size", 32))
 
     st_model: Optional[Any] = None
     hf_tokenizer: Optional[Any] = None
@@ -177,6 +201,11 @@ def _load_assets(config_path: str) -> AppState:
         hf_device=hf_device,
         max_len=max_len,
         normalize=normalize,
+        serving_candidates_k=serving_candidates_k,
+        stacked_topn=stacked_topn,
+        cross_encoder_model_name=cross_encoder_model_name,
+        cross_encoder_batch_size=cross_encoder_batch_size,
+        cross_reranker=None,
     )
 
 
@@ -213,8 +242,28 @@ def _encode_query(state: AppState, query: str) -> np.ndarray:
             return cls_emb.cpu().numpy().astype(np.float32)
 
 
-def search(state: AppState, query: str, topk: int, candidates_k: int) -> List[Dict[str, Any]]:
-    """Run encode -> FAISS -> features -> ranker -> top topk."""
+def _get_cross_reranker(state: AppState) -> Any:
+    """Lazy-load and cache the cross-encoder reranker."""
+    if state.cross_reranker is not None:
+        return state.cross_reranker
+    from src.rerank.cross_encoder import CrossEncoderReranker
+
+    state.cross_reranker = CrossEncoderReranker(
+        model_name=state.cross_encoder_model_name,
+        device=None,
+        batch_size=state.cross_encoder_batch_size,
+    )
+    return state.cross_reranker
+
+
+def search(
+    state: AppState,
+    query: str,
+    topk: int,
+    candidates_k: int,
+    reranker: str = "lgbm",
+) -> List[Dict[str, Any]]:
+    """Run encode -> FAISS -> optionally rerank -> return topk."""
     # 1. Encode query
     q_emb = _encode_query(state, query)
     # 2. FAISS search
@@ -244,6 +293,20 @@ def search(state: AppState, query: str, topk: int, candidates_k: int) -> List[Di
     if not valid_pids:
         return []
 
+    if reranker == "none":
+        # Dense-only results (no rerank fields)
+        n = min(topk, len(valid_pids))
+        out: List[Dict[str, Any]] = []
+        for i in range(n):
+            out.append({
+                "pid": valid_pids[i],
+                "dense_score": valid_dense[i],
+                "passage": cand_passages[i],
+                "rerank_score": None,
+                "cross_score": None,
+            })
+        return out
+
     query_tokens = _tokenize(query)
     q_len = len(query_tokens)
     docs_tokens = [_tokenize(p) for p in cand_passages]
@@ -270,18 +333,61 @@ def search(state: AppState, query: str, topk: int, candidates_k: int) -> List[Di
     # 5. Ranker predict and sort
     pred = state.ranker.predict(df)
     order = np.argsort(-np.asarray(pred))
-    # 6. Top topk
-    n = min(topk, len(order))
-    result_items: List[Dict[str, Any]] = []
-    for j in range(n):
-        idx = order[j]
-        result_items.append({
+
+    if reranker == "lgbm":
+        # 6. Top topk
+        n = min(topk, len(order))
+        result_items: List[Dict[str, Any]] = []
+        for j in range(n):
+            idx = order[j]
+            result_items.append({
+                "pid": valid_pids[idx],
+                "rerank_score": float(pred[idx]),
+                "dense_score": valid_dense[idx],
+                "cross_score": None,
+                "passage": cand_passages[idx],
+            })
+        return result_items
+
+    if reranker == "cross":
+        # Cross-encoder rerank over full candidate list
+        cross = _get_cross_reranker(state)
+        items: List[Dict[str, Any]] = []
+        for i in range(len(valid_pids)):
+            items.append({
+                "pid": valid_pids[i],
+                "dense_score": valid_dense[i],
+                "rerank_score": None,
+                "cross_score": None,
+                "passage": cand_passages[i],
+            })
+        reranked = cross.rerank(query, items, text_key="passage")
+        n = min(topk, len(reranked))
+        return reranked[:n]
+
+    if reranker != "stacked":
+        raise ValueError(
+            f"Unknown reranker: {reranker}. Use 'none', 'lgbm', 'cross', or 'stacked'."
+        )
+
+    # Stacked: LambdaRank -> top-N -> CrossEncoder
+    stacked_items: List[Dict[str, Any]] = []
+    for idx in order.tolist():
+        stacked_items.append({
             "pid": valid_pids[idx],
             "rerank_score": float(pred[idx]),
             "dense_score": valid_dense[idx],
             "passage": cand_passages[idx],
+            "cross_score": None,
         })
-    return result_items
+
+    topn = max(1, int(state.stacked_topn))
+    stacked_items = stacked_items[: min(topn, len(stacked_items))]
+    cross = _get_cross_reranker(state)
+    reranked = cross.rerank(query, stacked_items, text_key="passage")
+
+    n = min(topk, len(reranked))
+    return reranked[:n]
 
 
 # --- FastAPI app ---
@@ -328,15 +434,25 @@ def create_app() -> FastAPI:
         print(f"FAISS index dim: {dim}, ntotal: {ntotal}")
         print(f"Passages loaded (indexed only): {n_passages}")
 
-    @app.post("/search", response_model=SearchResponse)
+    @app.post("/search", response_model=SearchResponse, response_model_exclude_none=True)
     def post_search(request: SearchRequest) -> SearchResponse:
         state: AppState = getattr(app.state, "search_state", None)
         if state is None:
             raise HTTPException(status_code=503, detail="Search not initialized")
         topk = min(50, request.topk)
-        candidates_k = min(500, request.candidates_k)
+        candidates_k_req = request.candidates_k if request.candidates_k is not None else state.serving_candidates_k
+        candidates_k = min(500, int(candidates_k_req))
+        reranker = (request.reranker or "lgbm").strip().lower()
+        if reranker not in {"none", "lgbm", "cross", "stacked"}:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid reranker '{request.reranker}'. "
+                    "Use 'none', 'lgbm', 'cross', or 'stacked'."
+                ),
+            )
         try:
-            results = search(state, request.query, topk=topk, candidates_k=candidates_k)
+            results = search(state, request.query, topk=topk, candidates_k=candidates_k, reranker=reranker)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         return SearchResponse(query=request.query, results=[SearchResultItem(**r) for r in results])

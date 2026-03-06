@@ -24,7 +24,7 @@ faiss:
   index_type: flatip
   encoder_backend: sentence_transformer
   st_model_name: sentence-transformers/all-MiniLM-L6-v2
-  topk: 100
+  topk: 300
 ranker:
   objective: lambdarank
   num_leaves: 127
@@ -33,3 +33,10 @@ ranker:
   eval_at: 10
 indexing:
   batch_size: 128
+cross_encoder:
+  model_name: cross-encoder/ms-marco-MiniLM-L-6-v2
+  batch_size: 32
+serving:
+  candidates_k: 300
+stacked_rerank:
+  topn: 50
