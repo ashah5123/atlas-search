@@ -9,16 +9,22 @@ limits:
 retriever:
   model_name: distilbert-base-uncased
   max_len: 128
-  batch_size: 64
-  lr: 2e-5
-  epochs: 3
+  batch_size: 32
+  lr: 2.0e-05
+  epochs: 2
   normalize: true
   seed: 42
+  neg_topk: 100
+  neg_per_query: 8
+  candidate_k: 1000
+  max_train_pairs: 10000
+  max_train_queries: 5000
+  neg_start_rank: 50
 faiss:
   index_type: flatip
   encoder_backend: sentence_transformer
   st_model_name: sentence-transformers/all-MiniLM-L6-v2
-  topk: 100
+  topk: 1000
 ranker:
   objective: lambdarank
   num_leaves: 127
