@@ -24,10 +24,12 @@ faiss:
   index_type: flatip
   encoder_backend: sentence_transformer
   st_model_name: sentence-transformers/all-MiniLM-L6-v2
-  topk: 1000
+  topk: 100
 ranker:
   objective: lambdarank
   num_leaves: 127
   learning_rate: 0.05
   n_estimators: 200
   eval_at: 10
+indexing:
+  batch_size: 128

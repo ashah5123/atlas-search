@@ -19,6 +19,20 @@ Queries and passages are encoded with a bi-encoder (SentenceTransformer or train
 
 *All metrics are on the in-corpus dev subset (dev queries/qrels whose passages are in the 500k index).*
 
+## Results (300k subset)
+
+| Setting | Value |
+|--------|--------|
+| Corpus size | 300,000 passages (subset of MS MARCO Passage Ranking) |
+| In-corpus dev | 16 queries (filtered from 2,000) |
+| MiniLM+FAISS Recall@10 | 0.8750 |
+| MiniLM+FAISS Recall@50 | 0.9375 |
+| MiniLM+FAISS Recall@100 | 1.0000 |
+| LambdaRank NDCG@10 | 0.6098 |
+| LambdaRank MRR | 0.5080 |
+
+Subset indexing requires in-corpus filtering of dev queries and qrels (only queries whose relevant passages appear in the index are evaluated). Larger `max_passages` increases dev coverage.
+
 ## Quickstart
 
 ```bash
